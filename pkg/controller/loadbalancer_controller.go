@@ -16,16 +16,25 @@ import (
 	"github.com/triton/loadbalancer-controller/pkg/triton"
 )
 
+// TritonClientInterface defines the interface for Triton client operations
+type TritonClientInterface interface {
+	CreateLoadBalancer(ctx context.Context, params triton.LoadBalancerParams) error
+	UpdateLoadBalancer(ctx context.Context, name string, params triton.LoadBalancerParams) error
+	DeleteLoadBalancer(ctx context.Context, name string) error
+	GetLoadBalancer(ctx context.Context, name string) (*triton.LoadBalancerParams, error)
+	GetInstanceByName(ctx context.Context, name string) (*triton.TritonInstance, error)
+}
+
 // LoadBalancerReconciler reconciles a Service object with type LoadBalancer
 type LoadBalancerReconciler struct {
 	client.Client
-	Log         logr.Logger
-	Scheme      *runtime.Scheme
-	TritonClient *triton.Client
+	Log          logr.Logger
+	Scheme       *runtime.Scheme
+	TritonClient TritonClientInterface
 }
 
 // NewLoadBalancerReconciler creates a new LoadBalancerReconciler
-func NewLoadBalancerReconciler(client client.Client, log logr.Logger, scheme *runtime.Scheme, tritonClient *triton.Client) *LoadBalancerReconciler {
+func NewLoadBalancerReconciler(client client.Client, log logr.Logger, scheme *runtime.Scheme, tritonClient TritonClientInterface) *LoadBalancerReconciler {
 	return &LoadBalancerReconciler{
 		Client:       client,
 		Log:          log,
@@ -39,8 +48,7 @@ func NewLoadBalancerReconciler(client client.Client, log logr.Logger, scheme *ru
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 
 // Reconcile handles Service updates and creates/updates/deletes Triton load balancers as needed
-func (r *LoadBalancerReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
-	ctx := context.Background()
+func (r *LoadBalancerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("service", req.NamespacedName)
 
 	// Fetch the Service instance
@@ -109,7 +117,7 @@ func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *c
 	}
 
 	// Get load balancer instance to extract IP information
-	loadBalancer, err := r.TritonClient.GetLoadBalancer(ctx, service.Name)
+	_, err = r.TritonClient.GetLoadBalancer(ctx, service.Name)
 	if err != nil {
 		log.Error(err, "Failed to get load balancer info for status update")
 		return ctrl.Result{}, err
@@ -126,7 +134,7 @@ func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *c
 	if lbInstance != nil && len(lbInstance.IPs) > 0 {
 		// Copy current status
 		updatedService := service.DeepCopy()
-		
+
 		// Find a public IP address in the list
 		var lbIP string
 		for _, ip := range lbInstance.IPs {
@@ -136,12 +144,12 @@ func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *c
 				break
 			}
 		}
-		
+
 		// Use private IP if no public one is found
 		if lbIP == "" && len(lbInstance.IPs) > 0 {
 			lbIP = lbInstance.IPs[0]
 		}
-		
+
 		// Update the load balancer status
 		if lbIP != "" {
 			updatedService.Status.LoadBalancer.Ingress = []corev1.LoadBalancerIngress{
@@ -149,13 +157,13 @@ func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *c
 					IP: lbIP,
 				},
 			}
-			
+
 			// Update status subresource
 			if err := r.Status().Update(ctx, updatedService); err != nil {
 				log.Error(err, "Failed to update Service status with load balancer IP")
 				return ctrl.Result{}, err
 			}
-			
+
 			log.Info("Updated service status with load balancer IP", "ip", lbIP)
 		}
 	}
@@ -205,7 +213,7 @@ func (r *LoadBalancerReconciler) extractLoadBalancerParams(service *corev1.Servi
 
 	// Extract additional configuration from annotations
 	annotations := service.Annotations
-	
+
 	// Check for max_rs
 	if maxRS, ok := annotations["cloud.tritoncompute/max_rs"]; ok {
 		if maxRSInt, err := strconv.Atoi(maxRS); err == nil {

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -29,13 +30,13 @@ func newMockTritonClient() *mockTritonClient {
 	}
 }
 
-func (m *mockTritonClient) CreateLoadBalancer(ctx interface{}, params triton.LoadBalancerParams) error {
+func (m *mockTritonClient) CreateLoadBalancer(ctx context.Context, params triton.LoadBalancerParams) error {
 	m.loadBalancers[params.Name] = &params
 	m.instances[params.Name] = &triton.TritonInstance{
 		ID:   "test-instance-id",
 		Name: params.Name,
 		IPs:  []string{"192.0.2.1", "10.0.0.1"},
-		Tags: map[string]string{
+		Tags: map[string]interface{}{
 			"loadbalancer": "true",
 			"managed-by":   "triton-loadbalancer-controller",
 		},
@@ -43,18 +44,18 @@ func (m *mockTritonClient) CreateLoadBalancer(ctx interface{}, params triton.Loa
 	return nil
 }
 
-func (m *mockTritonClient) UpdateLoadBalancer(ctx interface{}, name string, params triton.LoadBalancerParams) error {
+func (m *mockTritonClient) UpdateLoadBalancer(ctx context.Context, name string, params triton.LoadBalancerParams) error {
 	m.loadBalancers[name] = &params
 	return nil
 }
 
-func (m *mockTritonClient) DeleteLoadBalancer(ctx interface{}, name string) error {
+func (m *mockTritonClient) DeleteLoadBalancer(ctx context.Context, name string) error {
 	delete(m.loadBalancers, name)
 	delete(m.instances, name)
 	return nil
 }
 
-func (m *mockTritonClient) GetLoadBalancer(ctx interface{}, name string) (*triton.LoadBalancerParams, error) {
+func (m *mockTritonClient) GetLoadBalancer(ctx context.Context, name string) (*triton.LoadBalancerParams, error) {
 	lb, exists := m.loadBalancers[name]
 	if !exists {
 		return nil, nil
@@ -62,7 +63,7 @@ func (m *mockTritonClient) GetLoadBalancer(ctx interface{}, name string) (*trito
 	return lb, nil
 }
 
-func (m *mockTritonClient) GetInstanceByName(ctx interface{}, name string) (*triton.TritonInstance, error) {
+func (m *mockTritonClient) GetInstanceByName(ctx context.Context, name string) (*triton.TritonInstance, error) {
 	instance, exists := m.instances[name]
 	if !exists {
 		return nil, nil
@@ -77,9 +78,9 @@ func TestReconcileCreateLoadBalancer(t *testing.T) {
 			Name:      "test-service",
 			Namespace: "default",
 			Annotations: map[string]string{
-				"cloud.tritoncompute/max_rs":          "64",
+				"cloud.tritoncompute/max_rs":           "64",
 				"cloud.tritoncompute/certificate_name": "example.com",
-				"cloud.tritoncompute/metrics_acl":     "10.0.0.0/8 192.168.0.0/16",
+				"cloud.tritoncompute/metrics_acl":      "10.0.0.0/8 192.168.0.0/16",
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -129,7 +130,8 @@ func TestReconcileCreateLoadBalancer(t *testing.T) {
 		},
 	}
 
-	_, err := reconciler.Reconcile(req)
+	ctx := context.Background()
+	_, err := reconciler.Reconcile(ctx, req)
 	if err != nil {
 		t.Fatalf("reconcile: (%v)", err)
 	}
@@ -189,7 +191,7 @@ func TestReconcileCreateLoadBalancer(t *testing.T) {
 
 	// Fetch the service to check if status was updated
 	updatedService := &corev1.Service{}
-	err = client.Get(req.NamespacedName, updatedService)
+	err = client.Get(ctx, req.NamespacedName, updatedService)
 	if err != nil {
 		t.Fatalf("failed to get service: %v", err)
 	}
