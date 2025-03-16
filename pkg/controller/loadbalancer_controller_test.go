@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"flag"
 	"os"
 	"testing"
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
