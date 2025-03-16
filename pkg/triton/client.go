@@ -5,6 +5,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -23,16 +24,29 @@ type Client struct {
 
 // NewClient creates a new Triton client with the provided credentials
 func NewClient(account, keyID, keyPath, url string) (*Client, error) {
+	if account == "" {
+		return nil, fmt.Errorf("Triton account name is required")
+	}
+	if keyID == "" {
+		return nil, fmt.Errorf("Triton key ID is required")
+	}
+	if keyPath == "" {
+		return nil, fmt.Errorf("Triton key path is required")
+	}
+	if url == "" {
+		return nil, fmt.Errorf("Triton API URL is required")
+	}
+
 	// Read the SSH private key file
-	privateKeyData, err := ioutil.ReadFile(keyPath)
+	privateKeyData, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read private key: %v", err)
+		return nil, fmt.Errorf("failed to read private key from %s: %v", keyPath, err)
 	}
 
 	// Parse the private key
 	block, _ := pem.Decode(privateKeyData)
 	if block == nil {
-		return nil, fmt.Errorf("failed to decode PEM block containing private key")
+		return nil, fmt.Errorf("failed to decode PEM block containing private key, check if file is in valid PEM format")
 	}
 
 	// Check if it's an encrypted key
@@ -69,9 +83,12 @@ func NewClient(account, keyID, keyPath, url string) (*Client, error) {
 	}
 
 	// Verify connection with a simple API call
-	_, err = computeClient.Instances().List(context.Background(), &compute.ListInstancesInput{})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	_, err = computeClient.Instances().List(ctx, &compute.ListInstancesInput{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to Triton API: %v", err)
+		return nil, fmt.Errorf("failed to connect to Triton API at %s: %v", url, err)
 	}
 
 	return &Client{
@@ -148,13 +165,22 @@ func (c *Client) CreateLoadBalancer(ctx context.Context, params LoadBalancerPara
 		metadata["cloud.tritoncompute:metrics_acl"] = aclString
 	}
 
+	// Default values
+	packageName := os.Getenv("TRITON_LB_PACKAGE")
+	if packageName == "" {
+		packageName = "g4-highcpu-1G"
+	}
+	
+	imageId := os.Getenv("TRITON_LB_IMAGE")
+	if imageId == "" {
+		imageId = "70e3ae72-96b6-11ea-9274-2f3c66e8b2c4" // Default HAProxy image
+	}
+	
 	// Use Triton API to create the load balancer as a machine
-	// For demo: using a fixed package and image ID
-	// In production, these should be configurable
 	createInput := &compute.CreateInstanceInput{
 		Name:     params.Name,
-		Package:  "g4-highcpu-1G",                        // Example package, should be configurable
-		Image:    "70e3ae72-96b6-11ea-9274-2f3c66e8b2c4", // Example image ID for HAProxy, should be configurable
+		Package:  packageName,
+		Image:    imageId,
 		Metadata: metadata,
 		Tags: map[string]interface{}{
 			"k8s-service":  params.Name,
@@ -168,29 +194,58 @@ func (c *Client) CreateLoadBalancer(ctx context.Context, params LoadBalancerPara
 		return err
 	}
 
+	// Get timeout settings from environment or use defaults
+	timeoutSeconds := 300 // Default: 5 minutes
+	if timeoutEnv := os.Getenv("TRITON_PROVISION_TIMEOUT"); timeoutEnv != "" {
+		if parsedTimeout, err := strconv.Atoi(timeoutEnv); err == nil && parsedTimeout > 0 {
+			timeoutSeconds = parsedTimeout
+		}
+	}
+	
+	// Calculate how many iterations needed with 10 second intervals
+	maxIterations := timeoutSeconds / 10
+	if maxIterations < 1 {
+		maxIterations = 1
+	}
+	
 	// Wait for the instance to be provisioned
-	for i := 0; i < 30; i++ { // 5 minutes max (10 sec intervals)
-		getInput := &compute.GetInstanceInput{
-			ID: instance.ID,
-		}
+	for i := 0; i < maxIterations; i++ {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled while waiting for load balancer to provision")
+		default:
+			getInput := &compute.GetInstanceInput{
+				ID: instance.ID,
+			}
 
-		currentInstance, err := c.compute.Instances().Get(ctx, getInput)
-		if err != nil {
-			return err
-		}
+			currentInstance, err := c.compute.Instances().Get(ctx, getInput)
+			if err != nil {
+				return fmt.Errorf("error checking instance status: %v", err)
+			}
 
-		if currentInstance.State == "running" {
-			break
-		}
+			if currentInstance.State == "running" {
+				return nil // Successfully provisioned
+			}
+			
+			// Log progress
+			if i%6 == 0 { // Every minute
+				fmt.Printf("Load balancer %s still provisioning (state: %s), waiting...\n", 
+					params.Name, currentInstance.State)
+			}
 
-		time.Sleep(10 * time.Second)
+			time.Sleep(10 * time.Second)
+		}
 	}
 
-	return nil
+	return fmt.Errorf("timed out waiting for load balancer to provision after %d seconds", timeoutSeconds)
 }
 
 // DeleteLoadBalancer deletes a load balancer in Triton
 func (c *Client) DeleteLoadBalancer(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("load balancer name cannot be empty")
+	}
+
 	// Find instance by name
 	listInput := &compute.ListInstancesInput{
 		Name: name,
@@ -202,7 +257,7 @@ func (c *Client) DeleteLoadBalancer(ctx context.Context, name string) error {
 
 	instances, err := c.compute.Instances().List(ctx, listInput)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to list instances: %v", err)
 	}
 
 	if len(instances) == 0 {
@@ -217,26 +272,50 @@ func (c *Client) DeleteLoadBalancer(ctx context.Context, name string) error {
 
 	err = c.compute.Instances().Delete(ctx, deleteInput)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to delete instance %s: %v", instances[0].ID, err)
+	}
+
+	// Get timeout settings from environment or use defaults
+	timeoutSeconds := 300 // Default: 5 minutes
+	if timeoutEnv := os.Getenv("TRITON_DELETE_TIMEOUT"); timeoutEnv != "" {
+		if parsedTimeout, err := strconv.Atoi(timeoutEnv); err == nil && parsedTimeout > 0 {
+			timeoutSeconds = parsedTimeout
+		}
+	}
+	
+	// Calculate how many iterations needed with 10 second intervals
+	maxIterations := timeoutSeconds / 10
+	if maxIterations < 1 {
+		maxIterations = 1
 	}
 
 	// Wait for the instance to be deleted (no longer appears in list)
-	for i := 0; i < 30; i++ { // Retry for a maximum of 30 times (5 minutes)
-		instances, err := c.compute.Instances().List(ctx, listInput)
-		if err != nil {
-			return err
-		}
+	for i := 0; i < maxIterations; i++ {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context cancelled while waiting for load balancer to be deleted")
+		default:
+			instances, err := c.compute.Instances().List(ctx, listInput)
+			if err != nil {
+				return fmt.Errorf("failed to check if instance was deleted: %v", err)
+			}
 
-		if len(instances) == 0 {
-			// Instance successfully deleted
-			return nil
-		}
+			if len(instances) == 0 {
+				// Instance successfully deleted
+				return nil
+			}
 
-		// Sleep for 10 seconds before retrying
-		time.Sleep(10 * time.Second)
+			// Log progress periodically
+			if i%6 == 0 { // Every minute
+				fmt.Printf("Waiting for load balancer %s to be deleted...\n", name)
+			}
+
+			// Sleep for 10 seconds before retrying
+			time.Sleep(10 * time.Second)
+		}
 	}
 
-	return fmt.Errorf("timed out waiting for load balancer %s to be deleted", name)
+	return fmt.Errorf("timed out waiting for load balancer %s to be deleted after %d seconds", name, timeoutSeconds)
 }
 
 // UpdateLoadBalancer updates an existing load balancer in Triton

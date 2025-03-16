@@ -127,6 +127,39 @@ The controller automatically maps the Service ports to the load balancer configu
 - `/pkg/controller`: Controller logic for reconciling Services
 - `/pkg/triton`: Triton CloudAPI client implementation
 - `/config`: Kubernetes manifests for deploying the controller
+- `/bin`: Test and utility scripts
+
+### Testing
+
+#### Unit Tests
+
+Run the unit tests with:
+
+```bash
+go test ./...
+```
+
+#### Integration Tests
+
+The controller supports real integration tests against a Triton cloud environment. To run these tests:
+
+1. Set up your Triton credentials:
+
+```bash
+export TRITON_TEST_INTEGRATION=true
+export TRITON_ACCOUNT=<your-account-name>
+export TRITON_KEY_ID=<your-key-id>
+export TRITON_KEY_PATH=<path-to-your-private-key>
+export TRITON_URL=<triton-api-url>
+```
+
+2. Run the tests with the `-tags=integration` flag:
+
+```bash
+go test -tags=integration ./...
+```
+
+These tests will create actual load balancers in your Triton environment and then clean them up after the test is complete.
 
 ### Adding Features
 
@@ -149,6 +182,38 @@ The controller automatically maps the Service ports to the load balancer configu
 ```
 kubectl logs -n triton-system -l app=triton-loadbalancer-controller
 ```
+
+## Testing with the Test Script
+
+Before integrating with Kubernetes, you can test the Triton load balancer implementation using the provided test script:
+
+```bash
+go run bin/test-loadbalancer.go \
+  --key-path=/path/to/your/private/key \
+  --key-id=<your-key-id> \
+  --account=<your-account-name> \
+  --url=<triton-api-url> \
+  --name=test-lb \
+  --action=create \
+  --target-port=8080
+```
+
+Available actions:
+- `create` - Create a new load balancer
+- `get` - Get information about an existing load balancer
+- `update` - Update an existing load balancer
+- `delete` - Delete a load balancer
+
+### Environment Variables
+
+The controller and test script support the following environment variables for configuration:
+
+| Environment Variable | Description | Default |
+|----------------------|-------------|---------|
+| `TRITON_LB_PACKAGE` | Triton package to use for load balancer instances | `g4-highcpu-1G` |
+| `TRITON_LB_IMAGE` | Triton image ID to use for load balancer instances | HAProxy image ID |
+| `TRITON_PROVISION_TIMEOUT` | Timeout (in seconds) for load balancer provisioning | 300 |
+| `TRITON_DELETE_TIMEOUT` | Timeout (in seconds) for load balancer deletion | 300 |
 
 ## License
 

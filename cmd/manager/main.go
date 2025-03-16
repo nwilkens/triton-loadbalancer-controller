@@ -55,11 +55,29 @@ func main() {
 	}
 
 	// Initialize Triton client
+	setupLog.Info("Initializing Triton client", 
+		"account", tritonAccount,
+		"keyId", tritonKeyId,
+		"keyPath", tritonKeyPath,
+		"url", tritonUrl)
+		
+	// Check for optional environment variables
+	if pkg := os.Getenv("TRITON_LB_PACKAGE"); pkg != "" {
+		setupLog.Info("Using custom load balancer package", "package", pkg)
+	}
+	
+	if img := os.Getenv("TRITON_LB_IMAGE"); img != "" {
+		setupLog.Info("Using custom load balancer image", "image", img)
+	}
+	
+	// Initialize client
 	tritonClient, err := triton.NewClient(tritonAccount, tritonKeyId, tritonKeyPath, tritonUrl)
 	if err != nil {
 		setupLog.Error(err, "unable to create Triton client")
 		os.Exit(1)
 	}
+	
+	setupLog.Info("Triton client initialized successfully")
 
 	if err = controller.NewLoadBalancerReconciler(
 		mgr.GetClient(),
