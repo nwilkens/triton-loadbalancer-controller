@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.21 as builder
+FROM golang:1.23 as builder
 
 WORKDIR /workspace
 # Copy the Go Modules manifests
@@ -11,7 +11,6 @@ RUN go mod download
 # Copy the source code
 COPY cmd/ cmd/
 COPY pkg/ pkg/
-COPY internal/ internal/
 
 # Build with CGO_ENABLED=0 for a completely static binary
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager cmd/manager/main.go

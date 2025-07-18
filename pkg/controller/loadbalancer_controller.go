@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -12,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/triton/loadbalancer-controller/pkg/triton"
 )
@@ -62,7 +65,7 @@ func (r *LoadBalancerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		// Error reading the object - requeue the request.
 		log.Error(err, "Failed to get Service")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to get service: %w", err)
 	}
 
 	// Only process LoadBalancer type services
@@ -70,9 +73,34 @@ func (r *LoadBalancerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
+	// Check if we need to add finalizer
+	finalizerName := "loadbalancer.triton.io/finalizer"
+
 	// Handle deletion
 	if !service.ObjectMeta.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, &service)
+		if controllerutil.ContainsFinalizer(&service, finalizerName) {
+			// Run finalization logic
+			if err := r.reconcileDelete(ctx, &service); err != nil {
+				// If fail to delete the external dependency here, return with error
+				// so that it can be retried
+				return ctrl.Result{}, err
+			}
+
+			// Remove finalizer from the list and update it.
+			controllerutil.RemoveFinalizer(&service, finalizerName)
+			if err := r.Update(ctx, &service); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Add finalizer if it doesn't exist
+	if !controllerutil.ContainsFinalizer(&service, finalizerName) {
+		controllerutil.AddFinalizer(&service, finalizerName)
+		if err := r.Update(ctx, &service); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
+		}
 	}
 
 	// Handle creation/update
@@ -82,14 +110,21 @@ func (r *LoadBalancerReconciler) Reconcile(ctx context.Context, req ctrl.Request
 // reconcileNormal handles the creation and update of load balancers
 func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *corev1.Service) (ctrl.Result, error) {
 	log := r.Log.WithValues("service", fmt.Sprintf("%s/%s", service.Namespace, service.Name))
-	log.Info("Reconciling LoadBalancer service")
+	log.Info("Reconciling LoadBalancer service",
+		"generation", service.Generation,
+		"resourceVersion", service.ResourceVersion)
 
 	// Extract load balancer configuration from service
 	lbParams, err := r.extractLoadBalancerParams(service)
 	if err != nil {
 		log.Error(err, "Failed to extract load balancer parameters")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("failed to extract LB params: %w", err)
 	}
+
+	log.V(1).Info("Extracted load balancer parameters",
+		"portCount", len(lbParams.PortMappings),
+		"maxBackends", lbParams.MaxBackends,
+		"hasCertificate", lbParams.CertificateName != "")
 
 	// Check if the load balancer already exists
 	existingLB, err := r.TritonClient.GetLoadBalancer(ctx, service.Name)
@@ -103,15 +138,25 @@ func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *c
 		log.Info("Creating new load balancer", "name", service.Name)
 		if err := r.TritonClient.CreateLoadBalancer(ctx, lbParams); err != nil {
 			log.Error(err, "Failed to create load balancer")
-			return ctrl.Result{}, err
+			// Check if this is a transient error that should be retried
+			if isTransientError(err) {
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to create load balancer: %w", err)
 		}
 		log.Info("Successfully created load balancer", "name", service.Name)
+		// Requeue to check status
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	} else {
 		// Update existing load balancer
 		log.Info("Updating existing load balancer", "name", service.Name)
 		if err := r.TritonClient.UpdateLoadBalancer(ctx, service.Name, lbParams); err != nil {
 			log.Error(err, "Failed to update load balancer")
-			return ctrl.Result{}, err
+			// Check if this is a transient error that should be retried
+			if isTransientError(err) {
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to update load balancer: %w", err)
 		}
 		log.Info("Successfully updated load balancer", "name", service.Name)
 	}
@@ -172,18 +217,18 @@ func (r *LoadBalancerReconciler) reconcileNormal(ctx context.Context, service *c
 }
 
 // reconcileDelete handles the deletion of load balancers
-func (r *LoadBalancerReconciler) reconcileDelete(ctx context.Context, service *corev1.Service) (ctrl.Result, error) {
+func (r *LoadBalancerReconciler) reconcileDelete(ctx context.Context, service *corev1.Service) error {
 	log := r.Log.WithValues("service", fmt.Sprintf("%s/%s", service.Namespace, service.Name))
 	log.Info("Reconciling LoadBalancer service deletion")
 
 	// Delete load balancer
 	if err := r.TritonClient.DeleteLoadBalancer(ctx, service.Name); err != nil {
 		log.Error(err, "Failed to delete load balancer")
-		return ctrl.Result{}, err
+		return fmt.Errorf("failed to delete load balancer: %w", err)
 	}
 
 	log.Info("Successfully deleted load balancer", "name", service.Name)
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // extractLoadBalancerParams extracts load balancer configuration from a Service
@@ -247,5 +292,20 @@ func (r *LoadBalancerReconciler) extractLoadBalancerParams(service *corev1.Servi
 func (r *LoadBalancerReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Service{}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 5,
+		}).
 		Complete(r)
+}
+
+// isTransientError checks if the error is transient and should be retried
+func isTransientError(err error) bool {
+	// Add logic to detect transient errors like network timeouts, rate limits, etc.
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "rate limit")
 }

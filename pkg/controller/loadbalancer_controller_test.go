@@ -53,10 +53,10 @@ func getRealTritonClient(t *testing.T) *triton.Client {
 
 // TritonClientWrapper is a wrapper that can provide either real or simulated client behavior
 type TritonClientWrapper struct {
-	RealClient     *triton.Client
-	simulated      bool
-	loadBalancers  map[string]*triton.LoadBalancerParams
-	instances      map[string]*triton.TritonInstance
+	RealClient    *triton.Client
+	simulated     bool
+	loadBalancers map[string]*triton.LoadBalancerParams
+	instances     map[string]*triton.TritonInstance
 }
 
 // NewTritonClientWrapper creates a new wrapper that can work in simulated mode or with a real client
@@ -69,7 +69,7 @@ func NewTritonClientWrapper(realClient *triton.Client) *TritonClientWrapper {
 			instances:     make(map[string]*triton.TritonInstance),
 		}
 	}
-	
+
 	// Use real client mode
 	return &TritonClientWrapper{
 		RealClient: realClient,
@@ -81,7 +81,7 @@ func (w *TritonClientWrapper) CreateLoadBalancer(ctx context.Context, params tri
 	if !w.simulated {
 		return w.RealClient.CreateLoadBalancer(ctx, params)
 	}
-	
+
 	// Simulated mode
 	w.loadBalancers[params.Name] = &params
 	w.instances[params.Name] = &triton.TritonInstance{
@@ -100,7 +100,7 @@ func (w *TritonClientWrapper) UpdateLoadBalancer(ctx context.Context, name strin
 	if !w.simulated {
 		return w.RealClient.UpdateLoadBalancer(ctx, name, params)
 	}
-	
+
 	// Simulated mode
 	w.loadBalancers[name] = &params
 	return nil
@@ -110,7 +110,7 @@ func (w *TritonClientWrapper) DeleteLoadBalancer(ctx context.Context, name strin
 	if !w.simulated {
 		return w.RealClient.DeleteLoadBalancer(ctx, name)
 	}
-	
+
 	// Simulated mode
 	delete(w.loadBalancers, name)
 	delete(w.instances, name)
@@ -121,7 +121,7 @@ func (w *TritonClientWrapper) GetLoadBalancer(ctx context.Context, name string) 
 	if !w.simulated {
 		return w.RealClient.GetLoadBalancer(ctx, name)
 	}
-	
+
 	// Simulated mode
 	lb, exists := w.loadBalancers[name]
 	if !exists {
@@ -134,7 +134,7 @@ func (w *TritonClientWrapper) GetInstanceByName(ctx context.Context, name string
 	if !w.simulated {
 		return w.RealClient.GetInstanceByName(ctx, name)
 	}
-	
+
 	// Simulated mode
 	instance, exists := w.instances[name]
 	if !exists {
@@ -146,19 +146,19 @@ func (w *TritonClientWrapper) GetInstanceByName(ctx context.Context, name string
 func TestReconcileCreateLoadBalancer(t *testing.T) {
 	// Check if we should use real Triton client for integration testing
 	realClient := getRealTritonClient(t)
-	
+
 	// Create test service name - use a unique name if using real client
 	serviceName := "test-service"
 	if realClient != nil {
 		serviceName = "test-service-" + metav1.Now().Format("20060102-150405")
-		
+
 		// Make sure to clean up after the test
 		defer func() {
 			ctx := context.Background()
 			_ = realClient.DeleteLoadBalancer(ctx, serviceName)
 		}()
 	}
-	
+
 	// Create a service to test with
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{

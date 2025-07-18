@@ -28,7 +28,10 @@ rules:
   verbs: ["list", "get", "watch"]
 - apiGroups: [""]
   resources: ["endpoints"]
-  verbs: ["list", "get", "watch", "create", "update", "patch"]
+  verbs: ["list", "get", "watch"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -44,19 +47,41 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: triton-config
+  namespace: triton-system
+data:
+  lb-package: "g4-highcpu-1G"
+  lb-image: ""  # Set your HAProxy image ID here
+  provision-timeout: "300"
+  delete-timeout: "300"
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: triton-credentials
   namespace: triton-system
 type: Opaque
 stringData:
-  triton-url: "https://us-east-1.api.joyent.com"  # Replace with your Triton CloudAPI endpoint
-  triton-account: ""                              # Replace with your Triton account ID
-  triton-key-id: ""                               # Replace with your Triton key ID (fingerprint)
-  triton-key: |                                   # MUST BE PEM FORMAT: $ ssh-keygen -p -m PEM -f <id_rsa_file> to convert
+  triton-url: ""     # Replace with your Triton CloudAPI endpoint
+  triton-account: "" # Replace with your Triton account ID
+  triton-key-id: ""  # Replace with your Triton key ID (fingerprint)
+  triton-key: |      # MUST BE PEM FORMAT: $ ssh-keygen -p -m PEM -f <id_rsa_file> to convert
     -----BEGIN RSA PRIVATE KEY-----
     ...
     -----END RSA PRIVATE KEY-----
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: triton-loadbalancer-controller
+  namespace: triton-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: triton-loadbalancer-controller
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -74,12 +99,20 @@ spec:
     metadata:
       labels:
         app: triton-loadbalancer-controller
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: triton-loadbalancer-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
       containers:
       - name: manager
-        image: nwilkens/triton-loadbalancer-controller:latest
-        imagePullPolicy: Always
+        image: triton/loadbalancer-controller:latest
+        imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
           runAsNonRoot: true
@@ -115,9 +148,25 @@ spec:
               name: triton-credentials
               key: triton-url
         - name: TRITON_LB_IMAGE
-          value: "8605a524-0655-43b9-adf1-7d572fe797eb"
+          valueFrom:
+            configMapKeyRef:
+              name: triton-config
+              key: lb-image
         - name: TRITON_LB_PACKAGE
-          value: "lb1.small"
+          valueFrom:
+            configMapKeyRef:
+              name: triton-config
+              key: lb-package
+        - name: TRITON_PROVISION_TIMEOUT
+          valueFrom:
+            configMapKeyRef:
+              name: triton-config
+              key: provision-timeout
+        - name: TRITON_DELETE_TIMEOUT
+          valueFrom:
+            configMapKeyRef:
+              name: triton-config
+              key: delete-timeout
         volumeMounts:
         - name: triton-key
           mountPath: /etc/triton
@@ -135,17 +184,48 @@ spec:
             port: 8081
           initialDelaySeconds: 15
           periodSeconds: 20
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /readyz
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
       volumes:
       - name: triton-key
         secret:
           secretName: triton-credentials
+          defaultMode: 0400
           items:
           - key: triton-key
             path: key
-            mode: 0600
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - triton-loadbalancer-controller
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-loadbalancer-controller-metrics
+  namespace: triton-system
+  labels:
+    app: triton-loadbalancer-controller
+spec:
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: triton-loadbalancer-controller

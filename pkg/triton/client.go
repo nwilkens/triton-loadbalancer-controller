@@ -84,7 +84,7 @@ func NewClient(account, keyID, keyPath, url string) (*Client, error) {
 	// Verify connection with a simple API call
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	
+
 	_, err = computeClient.Instances().List(ctx, &compute.ListInstancesInput{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to Triton API at %s: %v", url, err)
@@ -169,12 +169,12 @@ func (c *Client) CreateLoadBalancer(ctx context.Context, params LoadBalancerPara
 	if packageName == "" {
 		packageName = "g4-highcpu-1G"
 	}
-	
+
 	imageId := os.Getenv("TRITON_LB_IMAGE")
 	if imageId == "" {
 		imageId = "70e3ae72-96b6-11ea-9274-2f3c66e8b2c4" // Default HAProxy image
 	}
-	
+
 	// Use Triton API to create the load balancer as a machine
 	createInput := &compute.CreateInstanceInput{
 		Name:     params.Name,
@@ -200,13 +200,13 @@ func (c *Client) CreateLoadBalancer(ctx context.Context, params LoadBalancerPara
 			timeoutSeconds = parsedTimeout
 		}
 	}
-	
+
 	// Calculate how many iterations needed with 10 second intervals
 	maxIterations := timeoutSeconds / 10
 	if maxIterations < 1 {
 		maxIterations = 1
 	}
-	
+
 	// Wait for the instance to be provisioned
 	for i := 0; i < maxIterations; i++ {
 		select {
@@ -225,10 +225,10 @@ func (c *Client) CreateLoadBalancer(ctx context.Context, params LoadBalancerPara
 			if currentInstance.State == "running" {
 				return nil // Successfully provisioned
 			}
-			
+
 			// Log progress
 			if i%6 == 0 { // Every minute
-				fmt.Printf("Load balancer %s still provisioning (state: %s), waiting...\n", 
+				fmt.Printf("Load balancer %s still provisioning (state: %s), waiting...\n",
 					params.Name, currentInstance.State)
 			}
 
@@ -281,7 +281,7 @@ func (c *Client) DeleteLoadBalancer(ctx context.Context, name string) error {
 			timeoutSeconds = parsedTimeout
 		}
 	}
-	
+
 	// Calculate how many iterations needed with 10 second intervals
 	maxIterations := timeoutSeconds / 10
 	if maxIterations < 1 {
